@@ -129,3 +129,102 @@ Make sure channels are initialized first.
 The best practice is that the goroutine that creates the channel will be the one that write to it, and also the responsable for closing it. The owner of a channel is the goroutine that instantiates, writes and closes it. Channel *utilizers* only have a read-only view into the channel.
 
 Establishing the ownership of the channel will help us avoid deadlocks and panics, and it will help in avoiding scenarios like writing to a nil channel, writing to a closed channel, or closing it more than once.
+
+## Deep dive
+In this module we will try to understand the mechanics behind channels.
+We use `make` to create channels
+
+~~~go
+ch := make(chan int, 3)
+~~~
+
+Here we are creating a buffered channel with three elements. Internally, the channels are represented by the `hchan` structure.
+
+~~~go
+type hchan struct {
+    qcount      uint // total data in the queue
+    dataqsiz    uint // size of the circular queue
+    buf         unsafe.Pointer // points to an array of dataqsiz elements
+    elemsize    uint16
+    closed      uint32
+    elemtype     *_type // element type
+    sendx       uint // send index
+    recvx       uint // receive index
+    recvq       waitq // list of recv waiters
+    sendq       waitq // list of send waiters
+
+    // lock protects all fields in hchan
+    lock        mutex
+}
+
+type waitq struct {
+    first   *sudog
+    last    *sudog
+}
+~~~
+
+- **mutex lock**: any goroutine doing any channel operation must first acquire the lock on the channel.
+- **buf**: is a circular ring buffer where the actual data is stored. This is used only for the buffered channels.
+- **dataqsiz**: the size of the buffer.
+- **qcount**: indicates a total of data elements in the queue.
+- **sendx and recvx**: indicate the current index of the buffer from where it can send or receive data.
+- **recvq and sendq**: are the waiting queues which are used to store blocked goroutines. These were blocked while they were trying to send or receive data from the channel.
+- **waitq**: is the linked list of goroutines. The elements in the list are represented by the `sudog` struct.
+
+~~~go
+// sudog represents a g in a wait list, such as for sending/receiving on a channel
+type sudog struct {
+    g *g
+
+    next    *sudog
+    prev    *sudog
+    elem    unsafe.Pointer // data element(may point to stack)
+    // ...
+    c       *hchan // channel
+}
+~~~
+
+In the sudog struct we have
+
+- **g**, which is a reference to the goroutine
+- **elem**: pointer to memory, which contains the value to be sent, or to which the received value will be written to.
+
+To go back to the previous example
+
+~~~go
+ch := make(chan int, 3)
+~~~
+
+When we create a channel, hchan struct is allocated in the heap. `make` returns a reference to the allocated memory. Since ch is a pointer, it can be sent between the functions which can perform, send or receive operations on the channel. 
+
+Let us now look at what happens when we send or receive on a buffered channel
+
+~~~go
+ch := make(chan int, 3)
+// G1 - goroutine
+func G1(ch chan<- int) {
+    for _, v := range []int{1, 2, 3, 4} {
+        ch <- v
+    }
+}
+
+// G2 - goroutine
+func G2(ch <-chan int) {
+    for v := range ch {
+        fmt.Println(v)
+    }
+}
+~~~
+
+In this code snippet we have 2 goroutines. Goroutine G1 is sending a sequence of values into the channel, and goroutine G2 is receiving the sequence of values by ranging over the channel.
+
+When we create a channel this will be the representation.
+
+....VOLVER A VER REPRESENTACION DE LA LECCIÓN 28
+
+
+- There is no memory share between goroutines
+- Goroutines copy elements into and from hchan
+- hchan is protected by mutex lock
+
+*"Do not communicate by sharing memory; instead, share memory by communicating"*
